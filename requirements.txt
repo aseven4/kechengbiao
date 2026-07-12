@@ -1,0 +1,5 @@
+requests
+ddddocr
+beautifulsoup4
+opencv-python-headless
+numpy
