@@ -1,4 +1,4 @@
-name: Auto Schedule Push
+name: kechengbiao
 
 on:
   schedule:
