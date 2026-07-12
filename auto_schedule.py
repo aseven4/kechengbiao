@@ -92,58 +92,72 @@ def fetch_and_parse_schedule(session):
     table = soup.find('table', class_='table1')
     if not table:
         print("[-] 未能在页面中找到课表对应的表格(class=table1)")
-        return None
+        return "课表获取失败", "未能找到课表表格，请联系助手更新。"
         
     print("[+] 成功解析出课表框架，正在提取明天的课程...")
     
-    # 计算明天是周几 (基于北京时间)
     utc_now = datetime.datetime.utcnow()
     bj_now = utc_now + datetime.timedelta(hours=8)
     tomorrow = bj_now + datetime.timedelta(days=1)
-    tomorrow_weekday = tomorrow.weekday() # 0是周一, 4是周五, 5是周六, 6是周日
+    tomorrow_weekday = tomorrow.weekday()
     
     weekdays_zh = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     tomorrow_zh = weekdays_zh[tomorrow_weekday]
     
-    if tomorrow_weekday >= 5: # 周六或周日
+    if tomorrow_weekday >= 5: 
         msg = f"明天是{tomorrow_zh}，好好休息吧，没有课哦！\n\n(注: 周末如有临时安排请留意通知)"
-        return msg
+        return "明日无课，安心休息", msg
         
-    # 如果是周一到周五，提取对应列
     col_idx = tomorrow_weekday + 1 
     
     classes = []
-    for i in range(1, 12): # 1到11节
+    short_classes = [] 
+    
+    for i in range(1, 12):
         row_id = f"tr{i}"
         tr = table.find('tr', id=row_id)
-        if not tr:
-            continue
+        if not tr: continue
             
         tds = tr.find_all('td')
-        if len(tds) < 6:
-            continue
+        if len(tds) < 6: continue
             
-        # 解析时间节次，比如 "1\n08:00" -> "第1节 (08:00)"
+        # 1. 提取时间
         time_parts = tds[0].get_text(separator='|', strip=True).split('|')
-        if len(time_parts) >= 2:
-            time_str = f"第{time_parts[0]}节 ({time_parts[1]})"
-        else:
-            time_str = " ".join(time_parts)
+        jie_num = time_parts[0] if len(time_parts) >= 1 else str(i)
+        time_val = time_parts[1] if len(time_parts) >= 2 else f"第{jie_num}节"
             
-        # 解析课程内容
         cell_text = tds[col_idx].get_text(separator=' ', strip=True)
         if cell_text and cell_text != '' and cell_text != '&nbsp;':
-            classes.append(f"【{time_str}】\n{cell_text}")
+            # 2. 提取课程和地点
+            parts = cell_text.split()
+            course_name = parts[0][:10] if len(parts) > 0 else "未知课程"
+            
+            # 通常教务系统的课表，第二段文本大概率是地点或教室
+            location = parts[1][:10] if len(parts) > 1 else ""
+            
+            # 拼接短标题 (用于微信气泡外显): "08:00 高数 A101"
+            short_item = f"{time_val} {course_name} {location}".strip()
+            short_classes.append(short_item)
+            
+            # 拼接详情内容
+            classes.append(f"⏰ {time_val}\n📚 {course_name}\n📍 {location}".strip())
             
     if not classes:
-        msg = f"明天是{tomorrow_zh}，您全天没课，可以自由安排！"
+        full_msg = f"明天是{tomorrow_zh}，您全天没课，可以自由安排！"
+        short_title = "明日无课，安心休息"
     else:
-        msg = f"明天是{tomorrow_zh}，您的课程安排如下：\n\n" + "\n\n".join(classes)
+        full_msg = f"📅 【{tomorrow_zh} 课表】\n\n" + "\n\n".join(classes)
+        # 直接拿空格拼接，不再带"明:"前缀
+        short_title = " ".join(short_classes)
         
+        # 微信外显字数限制防截断
+        if len(short_title) > 65: 
+            short_title = short_title[:62] + "..."
+            
     print("[+] 明日课表文字生成完毕！")
-    return msg
+    return short_title, full_msg
 
-def push_to_wechat(text_content):
+def push_to_wechat(title, text_content):
     if not text_content:
         return
     if "在此处填写" in PUSHPLUS_TOKEN:
@@ -154,15 +168,15 @@ def push_to_wechat(text_content):
     url = "http://www.pushplus.plus/send"
     data = {
         "token": PUSHPLUS_TOKEN,
-        "title": "📅 明日课表提醒",
+        "title": title,
         "content": text_content,
-        "template": "txt" # 使用简洁的纯文本格式
+        "template": "txt" 
     }
     
     try:
         res = requests.post(url, json=data, timeout=10)
         if res.status_code == 200 and res.json().get('code') == 200:
-            print("[+] 微信推送成功！请在手机微信查收。")
+            print("[+] 微信推送成功！")
         else:
             print("[-] 微信推送失败:", res.text)
     except Exception as e:
@@ -171,5 +185,5 @@ def push_to_wechat(text_content):
 if __name__ == "__main__":
     session = login()
     if session:
-        schedule_msg = fetch_and_parse_schedule(session)
-        push_to_wechat(schedule_msg)
+        short_title, schedule_msg = fetch_and_parse_schedule(session)
+        push_to_wechat(short_title, schedule_msg)
