@@ -4,6 +4,7 @@ import ddddocr
 from bs4 import BeautifulSoup
 import time
 import datetime
+import random
 
 # ====== 配置区域 ======
 USER = os.environ.get("EDU_USER", "212404657")
@@ -11,15 +12,34 @@ PWD = os.environ.get("EDU_PWD", "lc010913.")
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN", "f64d5b2610eb492b8f0033cfc74b87c3")
 # ======================
 
+def check_holiday(bj_now):
+    """
+    检查是否是寒暑假。如果是，直接返回 True 阻止程序继续运行。
+    规则：1月15日到2月底，以及7月1日到8月底视为假期。
+    """
+    month = bj_now.month
+    day = bj_now.day
+    
+    if month == 7 or month == 8:
+        return True
+    if month == 1 and day >= 15:
+        return True
+    if month == 2:
+        return True
+    return False
+
 def login():
     base_url = "https://jwc.fdzcxy.edu.cn/"
     captcha_url = base_url + "ValidateCookie.asp"
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0",
-        "Referer": base_url
-    }
-
+    # 3. 随机浏览器标识池（防封锁机制）
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15"
+    ]
+    
     ocr = ddddocr.DdddOcr(beta=True, show_ad=False)
     print("[*] 开始全自动突破验证码登录...")
     
@@ -27,9 +47,13 @@ def login():
     for attempt in range(max_retries):
         try:
             session = requests.Session()
+            # 每次请求随机挑选一个 User-Agent
+            headers = {
+                "User-Agent": random.choice(user_agents),
+                "Referer": base_url
+            }
             session.headers.update(headers) 
             
-            # 把超时时间放宽到 15 秒
             res_main = session.get(base_url, timeout=15)
             res_main.encoding = 'gb2312'
             
@@ -45,7 +69,8 @@ def login():
             
             if len(captcha_text) != 4 or not captcha_text.isalnum():
                 print(f"[*] 尝试 {attempt + 1}/{max_retries}: 识别为 '{captcha_text}' (跳过)")
-                time.sleep(0.3)
+                # 3. 随机休眠 0.5 到 1.5 秒，模拟真人慢速操作
+                time.sleep(random.uniform(0.5, 1.5))
                 continue
                 
             print(f"[*] 尝试 {attempt + 1}/{max_retries}: 识别为 '{captcha_text}' (发起登录)")
@@ -63,7 +88,7 @@ def login():
                 login_html = res_login.text
                 
             if "验证码不正确" in login_html or "验证码" in login_html or "输入错误" in login_html:
-                time.sleep(0.3)
+                time.sleep(random.uniform(1.0, 2.5))
                 continue
             elif "密码错误" in login_html or "不存在" in login_html:
                 print("[-] 账号或密码错误，请检查！")
@@ -78,9 +103,8 @@ def login():
                 return session
 
         except Exception as e:
-            # 遇到网络超时或连接重置，不再崩溃，而是打印提示并继续重试
-            print(f"[*] 尝试 {attempt + 1}/{max_retries}: 网络波动或超时，继续重试...")
-            time.sleep(1)
+            print(f"[*] 尝试 {attempt + 1}/{max_retries}: 网络波动或超时，休息后重试...")
+            time.sleep(random.uniform(2.0, 4.0))
             continue
 
     print(f"[-] 连续 {max_retries} 次尝试均失败。")
@@ -89,17 +113,23 @@ def login():
 def fetch_and_parse_schedule(session):
     print("\n[*] 登录成功，开始拉取课表数据...")
     
-    # 依然保留第18周测试地址
-    schedule_url = "https://jwc.fdzcxy.edu.cn/kb/zkb_xs.asp?week1=18&kkxq=2025%E4%B8%8B"
+    # 恢复为默认的课表地址（抓取本周）
+    schedule_url = "https://jwc.fdzcxy.edu.cn/kb/zkb_xs.asp"
     print(f"[*] 正在获取课表: {schedule_url}")
     
-    try:
-        res_schedule = session.get(schedule_url, timeout=20)
-        res_schedule.encoding = 'utf-8'
-    except Exception as e:
-        print("[-] 获取课表时网络超时:", e)
-        return "课表获取超时", "教务系统网络太卡啦，获取课表超时，请稍后再试。"
-    
+    # 2. 课表拉取的重试机制 (最多试3次)
+    res_schedule = None
+    for fetch_attempt in range(3):
+        try:
+            res_schedule = session.get(schedule_url, timeout=20)
+            res_schedule.encoding = 'utf-8'
+            break
+        except Exception as e:
+            print(f"[-] 获取课表时网络超时 (尝试 {fetch_attempt+1}/3): {e}")
+            if fetch_attempt == 2:
+                return "⚠️课表获取超时", "教务系统网络太卡啦，获取课表失败，请手动登录查看！"
+            time.sleep(3)
+            
     soup = BeautifulSoup(res_schedule.text, 'html.parser')
     
     table = soup.find('table', class_='table1')
@@ -188,7 +218,18 @@ def push_to_wechat(title, text_content):
         print("[-] 微信推送请求异常:", e)
 
 if __name__ == "__main__":
+    utc_now = datetime.datetime.utcnow()
+    bj_now = utc_now + datetime.timedelta(hours=8)
+    
+    # 4. 节假日智能跳过 (已开启)
+    if check_holiday(bj_now):
+        print("[*] 当前处于寒暑假期间，智能休眠，不进行推送。")
+        import sys; sys.exit(0)
+        
     session = login()
     if session:
         short_title, schedule_msg = fetch_and_parse_schedule(session)
         push_to_wechat(short_title, schedule_msg)
+    else:
+        # 1. 失败告警机制
+        push_to_wechat("⚠️教务系统登录失败", "重试了100次都没进去，可能是系统维护或密码修改了，请注意手动核查明日课表！")
