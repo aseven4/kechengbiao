@@ -5,7 +5,6 @@ from bs4 import BeautifulSoup
 import time
 
 # ====== 配置区域 ======
-# 为了在云端运行的安全，我们优先从环境变量读取密码，如果不填则使用这里的默认值
 USER = os.environ.get("EDU_USER", "212404657")
 PWD = os.environ.get("EDU_PWD", "lc010913.")
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN", "f64d5b2610eb492b8f0033cfc74b87c3")
@@ -20,16 +19,12 @@ def login():
         "Referer": base_url
     }
 
-    # 开启 beta=True 模式，专门识别字母和数字
     ocr = ddddocr.DdddOcr(beta=True, show_ad=False)
-    
     print("[*] 开始全自动突破验证码登录...")
     
-    # 限制重试次数防止云端超时
     max_retries = 100
     for attempt in range(max_retries):
         session = requests.Session()
-        # 全局绑定浏览器伪装，防止获取课表时被拦截
         session.headers.update(headers) 
         
         res_main = session.get(base_url, timeout=10)
@@ -43,10 +38,8 @@ def login():
         if res_captcha.status_code != 200:
             continue
             
-        # 验证码直接识别，不需要降噪
         captcha_text = ocr.classification(res_captcha.content)
         
-        # 严格过滤位数不对或包含非法字符的验证码，直接跳过节约网络请求
         if len(captcha_text) != 4 or not captcha_text.isalnum():
             print(f"[*] 尝试 {attempt + 1}/{max_retries}: 识别为 '{captcha_text}' (跳过)")
             time.sleep(0.3)
@@ -61,7 +54,6 @@ def login():
         
         res_login = session.post(login_url, data=data, allow_redirects=False, timeout=10)
         
-        # 解析登录返回的文本
         login_html = ""
         if res_login.status_code == 200:
             res_login.encoding = 'gb2312'
@@ -74,7 +66,6 @@ def login():
             print("[-] 账号或密码错误，请检查！")
             return None
         
-        # 如果是 302 跳转到 main.asp 或者没有任何错误提示，认为成功
         if res_login.status_code == 302 and 'main.asp' in res_login.headers.get('Location', ''):
             print(f"\n[+] 突破成功！共尝试 {attempt + 1} 次。")
             return session
@@ -89,39 +80,16 @@ def login():
 def fetch_and_parse_schedule(session):
     print("\n[*] 登录成功，开始拉取课表数据...")
     
-    # 动态获取课表地址，防止因为子目录导致的 404 错误
-    menu_url = "https://jwc.fdzcxy.edu.cn/MENU.ASP"
-    res_menu = session.get(menu_url, timeout=10)
-    res_menu.encoding = 'gb2312'
+    # 【终极修复】硬编码真实的、隐藏的课表网址
+    schedule_url = "https://jwc.fdzcxy.edu.cn/kb/zkb_xs.asp"
+    print(f"[*] 正在获取课表: {schedule_url}")
     
-    soup_menu = BeautifulSoup(res_menu.text, 'html.parser')
-    links = soup_menu.find_all('a')
-    schedule_url = None
-    
-    # 遍历所有链接，自动寻找"周课程表"的链接
-    for link in links:
-        if link.text and ('课表' in link.text or '课程' in link.text):
-            if '周课程表' in link.text or '学生周课表' in link.text:
-                schedule_url = link.get('href')
-                break
-                
-    if not schedule_url:
-        # 如果寻找失败，尝试教务系统常见子目录
-        print("[-] 未能在菜单中找到课表链接，尝试常用默认地址...")
-        schedule_url = "/student/zkb_xs.asp"
-        
-    if not schedule_url.startswith('http'):
-        if not schedule_url.startswith('/'):
-            schedule_url = '/' + schedule_url
-        schedule_url = "https://jwc.fdzcxy.edu.cn" + schedule_url
-        
-    print(f"[*] 最终获取到的课表地址: {schedule_url}")
     res_schedule = session.get(schedule_url, timeout=15)
     res_schedule.encoding = 'gb2312'
     
     soup = BeautifulSoup(res_schedule.text, 'html.parser')
     
-    # 提取表头信息（学期、周次）
+    # 提取表头信息
     title_element = soup.find('td', class_='td3')
     schedule_title = title_element.text.strip() if title_element else "本周课程表"
     
@@ -149,8 +117,7 @@ def fetch_and_parse_schedule(session):
             </tr>
     """
     
-    # 遍历1到11节课
-    colors = ['#e0f7fa', '#fff9c4', '#f1f8e9', '#ffebee', '#f3e5f5'] # 柔和的卡片背景色循环
+    colors = ['#e0f7fa', '#fff9c4', '#f1f8e9', '#ffebee', '#f3e5f5']
     color_idx = 0
     
     for i in range(1, 12):
@@ -163,12 +130,9 @@ def fetch_and_parse_schedule(session):
         if len(tds) < 6:
             continue
             
-        # 第一列是时间节次
         time_text = tds[0].get_text(separator='<br>', strip=True)
-        
         row_html = f"<tr><td>{time_text}</td>"
         
-        # 后面5列是周一到周五的课
         for j in range(1, 6):
             cell_text = tds[j].get_text(separator='<br>', strip=True)
             if cell_text and cell_text != '' and cell_text != '&nbsp;':
