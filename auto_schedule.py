@@ -25,55 +25,63 @@ def login():
     
     max_retries = 100
     for attempt in range(max_retries):
-        session = requests.Session()
-        session.headers.update(headers) 
-        
-        res_main = session.get(base_url, timeout=10)
-        res_main.encoding = 'gb2312'
-        
-        soup_main = BeautifulSoup(res_main.text, 'html.parser')
-        form = soup_main.find('form', id='frm')
-        login_url = base_url + (form.get('action') if form and form.get('action') else "loginchk.asp")
+        try:
+            session = requests.Session()
+            session.headers.update(headers) 
             
-        res_captcha = session.get(captcha_url + "?id=" + str(time.time()), timeout=10)
-        if res_captcha.status_code != 200:
+            # 把超时时间放宽到 15 秒
+            res_main = session.get(base_url, timeout=15)
+            res_main.encoding = 'gb2312'
+            
+            soup_main = BeautifulSoup(res_main.text, 'html.parser')
+            form = soup_main.find('form', id='frm')
+            login_url = base_url + (form.get('action') if form and form.get('action') else "loginchk.asp")
+                
+            res_captcha = session.get(captcha_url + "?id=" + str(time.time()), timeout=15)
+            if res_captcha.status_code != 200:
+                continue
+                
+            captcha_text = ocr.classification(res_captcha.content)
+            
+            if len(captcha_text) != 4 or not captcha_text.isalnum():
+                print(f"[*] 尝试 {attempt + 1}/{max_retries}: 识别为 '{captcha_text}' (跳过)")
+                time.sleep(0.3)
+                continue
+                
+            print(f"[*] 尝试 {attempt + 1}/{max_retries}: 识别为 '{captcha_text}' (发起登录)")
+            data = {
+                "muser": USER,
+                "passwd": PWD,
+                "code": captcha_text
+            }
+            
+            res_login = session.post(login_url, data=data, allow_redirects=False, timeout=15)
+            
+            login_html = ""
+            if res_login.status_code == 200:
+                res_login.encoding = 'gb2312'
+                login_html = res_login.text
+                
+            if "验证码不正确" in login_html or "验证码" in login_html or "输入错误" in login_html:
+                time.sleep(0.3)
+                continue
+            elif "密码错误" in login_html or "不存在" in login_html:
+                print("[-] 账号或密码错误，请检查！")
+                return None
+            
+            if res_login.status_code == 302 and 'main.asp' in res_login.headers.get('Location', ''):
+                print(f"\n[+] 突破成功！共尝试 {attempt + 1} 次。")
+                return session
+                
+            if not login_html:
+                print(f"\n[+] 突破成功！共尝试 {attempt + 1} 次。")
+                return session
+
+        except Exception as e:
+            # 遇到网络超时或连接重置，不再崩溃，而是打印提示并继续重试
+            print(f"[*] 尝试 {attempt + 1}/{max_retries}: 网络波动或超时，继续重试...")
+            time.sleep(1)
             continue
-            
-        captcha_text = ocr.classification(res_captcha.content)
-        
-        if len(captcha_text) != 4 or not captcha_text.isalnum():
-            print(f"[*] 尝试 {attempt + 1}/{max_retries}: 识别为 '{captcha_text}' (跳过)")
-            time.sleep(0.3)
-            continue
-            
-        print(f"[*] 尝试 {attempt + 1}/{max_retries}: 识别为 '{captcha_text}' (发起登录)")
-        data = {
-            "muser": USER,
-            "passwd": PWD,
-            "code": captcha_text
-        }
-        
-        res_login = session.post(login_url, data=data, allow_redirects=False, timeout=10)
-        
-        login_html = ""
-        if res_login.status_code == 200:
-            res_login.encoding = 'gb2312'
-            login_html = res_login.text
-            
-        if "验证码不正确" in login_html or "验证码" in login_html or "输入错误" in login_html:
-            time.sleep(0.3)
-            continue
-        elif "密码错误" in login_html or "不存在" in login_html:
-            print("[-] 账号或密码错误，请检查！")
-            return None
-        
-        if res_login.status_code == 302 and 'main.asp' in res_login.headers.get('Location', ''):
-            print(f"\n[+] 突破成功！共尝试 {attempt + 1} 次。")
-            return session
-            
-        if not login_html:
-            print(f"\n[+] 突破成功！共尝试 {attempt + 1} 次。")
-            return session
 
     print(f"[-] 连续 {max_retries} 次尝试均失败。")
     return None
@@ -81,12 +89,16 @@ def login():
 def fetch_and_parse_schedule(session):
     print("\n[*] 登录成功，开始拉取课表数据...")
     
-    # 【注意！】这里暂时改成了第18周的网址用来测试，等开学后记得改回 "https://jwc.fdzcxy.edu.cn/kb/zkb_xs.asp"
+    # 依然保留第18周测试地址
     schedule_url = "https://jwc.fdzcxy.edu.cn/kb/zkb_xs.asp?week1=18&kkxq=2025%E4%B8%8B"
     print(f"[*] 正在获取课表: {schedule_url}")
     
-    res_schedule = session.get(schedule_url, timeout=15)
-    res_schedule.encoding = 'utf-8'  # <--- 就是这里修复了乱码！
+    try:
+        res_schedule = session.get(schedule_url, timeout=20)
+        res_schedule.encoding = 'utf-8'
+    except Exception as e:
+        print("[-] 获取课表时网络超时:", e)
+        return "课表获取超时", "教务系统网络太卡啦，获取课表超时，请稍后再试。"
     
     soup = BeautifulSoup(res_schedule.text, 'html.parser')
     
@@ -122,25 +134,19 @@ def fetch_and_parse_schedule(session):
         tds = tr.find_all('td')
         if len(tds) < 6: continue
             
-        # 1. 提取时间
         time_parts = tds[0].get_text(separator='|', strip=True).split('|')
         jie_num = time_parts[0] if len(time_parts) >= 1 else str(i)
         time_val = time_parts[1] if len(time_parts) >= 2 else f"第{jie_num}节"
             
         cell_text = tds[col_idx].get_text(separator=' ', strip=True)
         if cell_text and cell_text != '' and cell_text != '&nbsp;':
-            # 2. 提取课程和地点
             parts = cell_text.split()
             course_name = parts[0] if len(parts) > 0 else "未知课程"
-            
-            # 通常教务系统的课表，第二段文本大概率是地点或教室
             location = parts[1] if len(parts) > 1 else ""
             
-            # 拼接短标题 (用于微信气泡外显): "19:00 思想政治理论课实践(二) [机北306]"
             short_item = f"{time_val} {course_name[:12]} {location}".strip()
             short_classes.append(short_item)
             
-            # 拼接详情内容
             classes.append(f"⏰ {time_val}\n📚 {course_name}\n📍 {location}".strip())
             
     if not classes:
@@ -148,10 +154,8 @@ def fetch_and_parse_schedule(session):
         short_title = "明日无课，安心休息"
     else:
         full_msg = f"📅 【{tomorrow_zh} 课表】\n\n" + "\n\n".join(classes)
-        # 气泡外显直接拼接不带明字
         short_title = " ".join(short_classes)
         
-        # 微信外显字数限制防截断
         if len(short_title) > 65: 
             short_title = short_title[:62] + "..."
             
@@ -175,7 +179,7 @@ def push_to_wechat(title, text_content):
     }
     
     try:
-        res = requests.post(url, json=data, timeout=10)
+        res = requests.post(url, json=data, timeout=15)
         if res.status_code == 200 and res.json().get('code') == 200:
             print("[+] 微信推送成功！")
         else:
