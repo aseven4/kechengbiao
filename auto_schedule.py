@@ -16,7 +16,7 @@ def login():
     captcha_url = base_url + "ValidateCookie.asp"
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0",
         "Referer": base_url
     }
 
@@ -29,14 +29,17 @@ def login():
     max_retries = 100
     for attempt in range(max_retries):
         session = requests.Session()
-        res_main = session.get(base_url, headers=headers, timeout=10)
+        # 【关键修复】全局绑定浏览器伪装，防止获取课表时被拦截
+        session.headers.update(headers) 
+        
+        res_main = session.get(base_url, timeout=10)
         res_main.encoding = 'gb2312'
         
         soup_main = BeautifulSoup(res_main.text, 'html.parser')
         form = soup_main.find('form', id='frm')
         login_url = base_url + (form.get('action') if form and form.get('action') else "loginchk.asp")
             
-        res_captcha = session.get(captcha_url + "?id=" + str(time.time()), headers=headers, timeout=10)
+        res_captcha = session.get(captcha_url + "?id=" + str(time.time()), timeout=10)
         if res_captcha.status_code != 200:
             continue
             
@@ -56,7 +59,7 @@ def login():
             "code": captcha_text
         }
         
-        res_login = session.post(login_url, data=data, headers=headers, allow_redirects=False, timeout=10)
+        res_login = session.post(login_url, data=data, allow_redirects=False, timeout=10)
         
         # 有的教务系统会返回 200 然后弹 alert，这里解析文本
         login_html = ""
@@ -103,6 +106,8 @@ def fetch_and_parse_schedule(session):
     table = soup.find('table', class_='table1')
     if not table:
         print("[-] 未能在页面中找到课表对应的表格(class=table1)")
+        # 加入防拦截调试信息
+        print("网页拦截内容前500字:", res_schedule.text[:500])
         return None
         
     print("[+] 成功解析出课表框架，正在生成排版...")
@@ -158,7 +163,7 @@ def fetch_and_parse_schedule(session):
     html_out += """
         </table>
         <br>
-        <p style="font-size: 12px; color: gray; text-align: right;">-- 来自 Antigravity 自动化推送助手 --</p>
+        <p style="font-size: 12px; color: gray; text-align: right;">-- 来自自动化推送助手 --</p>
     </div>
     """
     
