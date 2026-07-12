@@ -86,7 +86,7 @@ def fetch_and_parse_schedule(session):
     print(f"[*] 正在获取课表: {schedule_url}")
     
     res_schedule = session.get(schedule_url, timeout=15)
-    res_schedule.encoding = 'gb2312'
+    res_schedule.encoding = 'utf-8'  # <--- 就是这里修复了乱码！
     
     soup = BeautifulSoup(res_schedule.text, 'html.parser')
     
