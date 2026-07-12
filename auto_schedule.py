@@ -81,7 +81,8 @@ def login():
 def fetch_and_parse_schedule(session):
     print("\n[*] 登录成功，开始拉取课表数据...")
     
-    schedule_url = "https://jwc.fdzcxy.edu.cn/kb/zkb_xs.asp"
+    # 【注意！】这里暂时改成了第18周的网址用来测试，等开学后记得改回 "https://jwc.fdzcxy.edu.cn/kb/zkb_xs.asp"
+    schedule_url = "https://jwc.fdzcxy.edu.cn/kb/zkb_xs.asp?week1=18&kkxq=2025%E4%B8%8B"
     print(f"[*] 正在获取课表: {schedule_url}")
     
     res_schedule = session.get(schedule_url, timeout=15)
@@ -130,13 +131,13 @@ def fetch_and_parse_schedule(session):
         if cell_text and cell_text != '' and cell_text != '&nbsp;':
             # 2. 提取课程和地点
             parts = cell_text.split()
-            course_name = parts[0][:10] if len(parts) > 0 else "未知课程"
+            course_name = parts[0] if len(parts) > 0 else "未知课程"
             
             # 通常教务系统的课表，第二段文本大概率是地点或教室
-            location = parts[1][:10] if len(parts) > 1 else ""
+            location = parts[1] if len(parts) > 1 else ""
             
-            # 拼接短标题 (用于微信气泡外显): "08:00 高数 A101"
-            short_item = f"{time_val} {course_name} {location}".strip()
+            # 拼接短标题 (用于微信气泡外显): "19:00 思想政治理论课实践(二) [机北306]"
+            short_item = f"{time_val} {course_name[:12]} {location}".strip()
             short_classes.append(short_item)
             
             # 拼接详情内容
@@ -147,7 +148,7 @@ def fetch_and_parse_schedule(session):
         short_title = "明日无课，安心休息"
     else:
         full_msg = f"📅 【{tomorrow_zh} 课表】\n\n" + "\n\n".join(classes)
-        # 直接拿空格拼接，不再带"明:"前缀
+        # 气泡外显直接拼接不带明字
         short_title = " ".join(short_classes)
         
         # 微信外显字数限制防截断
