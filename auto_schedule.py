@@ -29,7 +29,7 @@ def login():
     max_retries = 100
     for attempt in range(max_retries):
         session = requests.Session()
-        # 【关键修复】全局绑定浏览器伪装，防止获取课表时被拦截
+        # 全局绑定浏览器伪装，防止获取课表时被拦截
         session.headers.update(headers) 
         
         res_main = session.get(base_url, timeout=10)
@@ -61,7 +61,7 @@ def login():
         
         res_login = session.post(login_url, data=data, allow_redirects=False, timeout=10)
         
-        # 有的教务系统会返回 200 然后弹 alert，这里解析文本
+        # 解析登录返回的文本
         login_html = ""
         if res_login.status_code == 200:
             res_login.encoding = 'gb2312'
@@ -79,7 +79,6 @@ def login():
             print(f"\n[+] 突破成功！共尝试 {attempt + 1} 次。")
             return session
             
-        # 兼容处理
         if not login_html:
             print(f"\n[+] 突破成功！共尝试 {attempt + 1} 次。")
             return session
@@ -90,9 +89,33 @@ def login():
 def fetch_and_parse_schedule(session):
     print("\n[*] 登录成功，开始拉取课表数据...")
     
-    # 既然我们已经知道课表的地址了，就直接访问它
-    schedule_url = "https://jwc.fdzcxy.edu.cn/zkb_xs.asp"
-    print(f"[*] 正在获取课表: {schedule_url}")
+    # 动态获取课表地址，防止因为子目录导致的 404 错误
+    menu_url = "https://jwc.fdzcxy.edu.cn/MENU.ASP"
+    res_menu = session.get(menu_url, timeout=10)
+    res_menu.encoding = 'gb2312'
+    
+    soup_menu = BeautifulSoup(res_menu.text, 'html.parser')
+    links = soup_menu.find_all('a')
+    schedule_url = None
+    
+    # 遍历所有链接，自动寻找"周课程表"的链接
+    for link in links:
+        if link.text and ('课表' in link.text or '课程' in link.text):
+            if '周课程表' in link.text or '学生周课表' in link.text:
+                schedule_url = link.get('href')
+                break
+                
+    if not schedule_url:
+        # 如果寻找失败，尝试教务系统常见子目录
+        print("[-] 未能在菜单中找到课表链接，尝试常用默认地址...")
+        schedule_url = "/student/zkb_xs.asp"
+        
+    if not schedule_url.startswith('http'):
+        if not schedule_url.startswith('/'):
+            schedule_url = '/' + schedule_url
+        schedule_url = "https://jwc.fdzcxy.edu.cn" + schedule_url
+        
+    print(f"[*] 最终获取到的课表地址: {schedule_url}")
     res_schedule = session.get(schedule_url, timeout=15)
     res_schedule.encoding = 'gb2312'
     
@@ -106,7 +129,6 @@ def fetch_and_parse_schedule(session):
     table = soup.find('table', class_='table1')
     if not table:
         print("[-] 未能在页面中找到课表对应的表格(class=table1)")
-        # 加入防拦截调试信息
         print("网页拦截内容前500字:", res_schedule.text[:500])
         return None
         
@@ -149,7 +171,6 @@ def fetch_and_parse_schedule(session):
         # 后面5列是周一到周五的课
         for j in range(1, 6):
             cell_text = tds[j].get_text(separator='<br>', strip=True)
-            # 如果不是空的(&nbsp; 解析后通常为空或只包含空白)
             if cell_text and cell_text != '' and cell_text != '&nbsp;':
                 bg_color = colors[color_idx % len(colors)]
                 color_idx += 1
@@ -183,7 +204,7 @@ def push_to_wechat(html_content):
         "token": PUSHPLUS_TOKEN,
         "title": "📚 您的本周课表已送达",
         "content": html_content,
-        "template": "html" # 启用 HTML 模板渲染表格卡片
+        "template": "html"
     }
     
     try:
@@ -198,7 +219,5 @@ def push_to_wechat(html_content):
 if __name__ == "__main__":
     session = login()
     if session:
-        # 获取并解析课表，生成精美HTML
         schedule_html = fetch_and_parse_schedule(session)
-        # 通过PushPlus推送到手机微信
         push_to_wechat(schedule_html)
