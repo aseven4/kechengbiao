@@ -1,11 +1,8 @@
+import os
 import requests
 import ddddocr
 from bs4 import BeautifulSoup
 import time
-import cv2
-import numpy as np
-
-import os
 
 # ====== 配置区域 ======
 # 为了在云端运行的安全，我们优先从环境变量读取密码，如果不填则使用这里的默认值
@@ -13,28 +10,6 @@ USER = os.environ.get("EDU_USER", "212404657")
 PWD = os.environ.get("EDU_PWD", "lc010913.")
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN", "f64d5b2610eb492b8f0033cfc74b87c3")
 # ======================
-
-def process_captcha(image_bytes):
-    """
-    使用 OpenCV 处理验证码图片，去除噪点和干扰线，提高 ddddocr 识别率
-    """
-    # 将字节转换为 numpy 数组
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
-    # 转灰度图
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
-    # 二值化（根据实际验证码颜色可以调整阈值，这里假设干扰线较浅）
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
-    
-    # 形态学操作去噪（开运算去除小噪点）
-    kernel = np.ones((2, 2), np.uint8)
-    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-    
-    # 将处理后的图像转换回字节
-    _, buffer = cv2.imencode('.jpg', opening)
-    return buffer.tobytes()
 
 def login():
     base_url = "https://jwc.fdzcxy.edu.cn/"
@@ -45,49 +20,69 @@ def login():
         "Referer": base_url
     }
 
-    ocr = ddddocr.DdddOcr(show_ad=False)
+    # 开启 beta=True 模式，专门识别字母和数字
+    ocr = ddddocr.DdddOcr(beta=True, show_ad=False)
     
     print("[*] 开始全自动突破验证码登录...")
     
-    # 无限重试，直到登录成功（验证码识别正确）
-    attempt = 1
-    while True:
-        print(f"\r[*] 正在进行第 {attempt} 次尝试...", end="", flush=True)
+    # 限制重试次数防止云端超时
+    max_retries = 100
+    for attempt in range(max_retries):
         session = requests.Session()
-        res_main = session.get(base_url, headers=headers)
+        res_main = session.get(base_url, headers=headers, timeout=10)
         res_main.encoding = 'gb2312'
         
         soup_main = BeautifulSoup(res_main.text, 'html.parser')
         form = soup_main.find('form', id='frm')
         login_url = base_url + (form.get('action') if form and form.get('action') else "loginchk.asp")
             
-        res_captcha = session.get(captcha_url + "?id=" + str(time.time()), headers=headers)
+        res_captcha = session.get(captcha_url + "?id=" + str(time.time()), headers=headers, timeout=10)
         if res_captcha.status_code != 200:
-            attempt += 1
             continue
             
-        # 验证码预处理并识别
-        processed_img = process_captcha(res_captcha.content)
-        captcha_text = ocr.classification(processed_img)
+        # 验证码直接识别，不需要降噪
+        captcha_text = ocr.classification(res_captcha.content)
         
-        if len(captcha_text) < 4:
-            attempt += 1
+        # 严格过滤位数不对或包含非法字符的验证码，直接跳过节约网络请求
+        if len(captcha_text) != 4 or not captcha_text.isalnum():
+            print(f"[*] 尝试 {attempt + 1}/{max_retries}: 识别为 '{captcha_text}' (跳过)")
+            time.sleep(0.3)
             continue
             
+        print(f"[*] 尝试 {attempt + 1}/{max_retries}: 识别为 '{captcha_text}' (发起登录)")
         data = {
             "muser": USER,
             "passwd": PWD,
             "code": captcha_text
         }
         
-        res_login = session.post(login_url, data=data, headers=headers, allow_redirects=False)
+        res_login = session.post(login_url, data=data, headers=headers, allow_redirects=False, timeout=10)
         
-        # 成功标志：302 跳转到 main.asp
+        # 有的教务系统会返回 200 然后弹 alert，这里解析文本
+        login_html = ""
+        if res_login.status_code == 200:
+            res_login.encoding = 'gb2312'
+            login_html = res_login.text
+            
+        if "验证码不正确" in login_html or "验证码" in login_html or "输入错误" in login_html:
+            time.sleep(0.3)
+            continue
+        elif "密码错误" in login_html or "不存在" in login_html:
+            print("[-] 账号或密码错误，请检查！")
+            return None
+        
+        # 如果是 302 跳转到 main.asp 或者没有任何错误提示，认为成功
         if res_login.status_code == 302 and 'main.asp' in res_login.headers.get('Location', ''):
-            print(f"\n[+] 突破成功！共尝试 {attempt} 次。验证码识别为: {captcha_text}")
+            print(f"\n[+] 突破成功！共尝试 {attempt + 1} 次。")
             return session
             
-        attempt += 1
+        # 兼容处理
+        if not login_html:
+            print(f"\n[+] 突破成功！共尝试 {attempt + 1} 次。")
+            return session
+
+    print(f"[-] 连续 {max_retries} 次尝试均失败。")
+    return None
 
 def fetch_and_parse_schedule(session):
     print("\n[*] 登录成功，开始拉取课表数据...")
@@ -95,7 +90,7 @@ def fetch_and_parse_schedule(session):
     # 既然我们已经知道课表的地址了，就直接访问它
     schedule_url = "https://jwc.fdzcxy.edu.cn/zkb_xs.asp"
     print(f"[*] 正在获取课表: {schedule_url}")
-    res_schedule = session.get(schedule_url)
+    res_schedule = session.get(schedule_url, timeout=15)
     res_schedule.encoding = 'gb2312'
     
     soup = BeautifulSoup(res_schedule.text, 'html.parser')
@@ -181,16 +176,19 @@ def push_to_wechat(html_content):
     url = "http://www.pushplus.plus/send"
     data = {
         "token": PUSHPLUS_TOKEN,
-        "title": "📚 您的本周课表测试已送达",
+        "title": "📚 您的本周课表已送达",
         "content": html_content,
         "template": "html" # 启用 HTML 模板渲染表格卡片
     }
     
-    res = requests.post(url, json=data)
-    if res.status_code == 200 and res.json().get('code') == 200:
-        print("[+] 微信推送成功！请在手机微信查收。")
-    else:
-        print("[-] 微信推送失败:", res.text)
+    try:
+        res = requests.post(url, json=data, timeout=10)
+        if res.status_code == 200 and res.json().get('code') == 200:
+            print("[+] 微信推送成功！请在手机微信查收。")
+        else:
+            print("[-] 微信推送失败:", res.text)
+    except Exception as e:
+        print("[-] 微信推送请求异常:", e)
 
 if __name__ == "__main__":
     session = login()
