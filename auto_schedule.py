@@ -3,6 +3,7 @@ import requests
 import ddddocr
 from bs4 import BeautifulSoup
 import time
+import datetime
 
 # ====== 配置区域 ======
 USER = os.environ.get("EDU_USER", "212404657")
@@ -80,7 +81,6 @@ def login():
 def fetch_and_parse_schedule(session):
     print("\n[*] 登录成功，开始拉取课表数据...")
     
-    # 【终极修复】硬编码真实的、隐藏的课表网址
     schedule_url = "https://jwc.fdzcxy.edu.cn/kb/zkb_xs.asp"
     print(f"[*] 正在获取课表: {schedule_url}")
     
@@ -89,38 +89,31 @@ def fetch_and_parse_schedule(session):
     
     soup = BeautifulSoup(res_schedule.text, 'html.parser')
     
-    # 提取表头信息
-    title_element = soup.find('td', class_='td3')
-    schedule_title = title_element.text.strip() if title_element else "本周课程表"
-    
-    # 查找课表的主体 table
     table = soup.find('table', class_='table1')
     if not table:
         print("[-] 未能在页面中找到课表对应的表格(class=table1)")
-        print("网页拦截内容前500字:", res_schedule.text[:500])
         return None
         
-    print("[+] 成功解析出课表框架，正在生成排版...")
+    print("[+] 成功解析出课表框架，正在提取明天的课程...")
     
-    # 开始生成 PushPlus 所需的精美 HTML
-    html_out = f"""
-    <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
-        <h3 style="color: #009689; text-align: center;">{schedule_title}</h3>
-        <table border="1" cellpadding="5" cellspacing="0" style="width: 100%; border-collapse: collapse; text-align: center; font-size: 14px;">
-            <tr style="background-color: #f2f2f2; color: #333;">
-                <th style="width: 16%;">节次</th>
-                <th style="width: 16%;">周一</th>
-                <th style="width: 16%;">周二</th>
-                <th style="width: 16%;">周三</th>
-                <th style="width: 16%;">周四</th>
-                <th style="width: 16%;">周五</th>
-            </tr>
-    """
+    # 计算明天是周几 (基于北京时间)
+    utc_now = datetime.datetime.utcnow()
+    bj_now = utc_now + datetime.timedelta(hours=8)
+    tomorrow = bj_now + datetime.timedelta(days=1)
+    tomorrow_weekday = tomorrow.weekday() # 0是周一, 4是周五, 5是周六, 6是周日
     
-    colors = ['#e0f7fa', '#fff9c4', '#f1f8e9', '#ffebee', '#f3e5f5']
-    color_idx = 0
+    weekdays_zh = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    tomorrow_zh = weekdays_zh[tomorrow_weekday]
     
-    for i in range(1, 12):
+    if tomorrow_weekday >= 5: # 周六或周日
+        msg = f"明天是{tomorrow_zh}，好好休息吧，没有课哦！\n\n(注: 周末如有临时安排请留意通知)"
+        return msg
+        
+    # 如果是周一到周五，提取对应列
+    col_idx = tomorrow_weekday + 1 
+    
+    classes = []
+    for i in range(1, 12): # 1到11节
         row_id = f"tr{i}"
         tr = table.find('tr', id=row_id)
         if not tr:
@@ -130,45 +123,40 @@ def fetch_and_parse_schedule(session):
         if len(tds) < 6:
             continue
             
-        time_text = tds[0].get_text(separator='<br>', strip=True)
-        row_html = f"<tr><td>{time_text}</td>"
+        # 解析时间节次，比如 "1\n08:00" -> "第1节 (08:00)"
+        time_parts = tds[0].get_text(separator='|', strip=True).split('|')
+        if len(time_parts) >= 2:
+            time_str = f"第{time_parts[0]}节 ({time_parts[1]})"
+        else:
+            time_str = " ".join(time_parts)
+            
+        # 解析课程内容
+        cell_text = tds[col_idx].get_text(separator=' ', strip=True)
+        if cell_text and cell_text != '' and cell_text != '&nbsp;':
+            classes.append(f"【{time_str}】\n{cell_text}")
+            
+    if not classes:
+        msg = f"明天是{tomorrow_zh}，您全天没课，可以自由安排！"
+    else:
+        msg = f"明天是{tomorrow_zh}，您的课程安排如下：\n\n" + "\n\n".join(classes)
         
-        for j in range(1, 6):
-            cell_text = tds[j].get_text(separator='<br>', strip=True)
-            if cell_text and cell_text != '' and cell_text != '&nbsp;':
-                bg_color = colors[color_idx % len(colors)]
-                color_idx += 1
-                row_html += f'<td style="background-color: {bg_color}; border-radius: 4px; padding: 4px;">{cell_text}</td>'
-            else:
-                row_html += "<td></td>"
-                
-        row_html += "</tr>"
-        html_out += row_html
-        
-    html_out += """
-        </table>
-        <br>
-        <p style="font-size: 12px; color: gray; text-align: right;">-- 来自自动化推送助手 --</p>
-    </div>
-    """
-    
-    print("[+] 课表卡片生成完毕！")
-    return html_out
+    print("[+] 明日课表文字生成完毕！")
+    return msg
 
-def push_to_wechat(html_content):
-    if not html_content:
+def push_to_wechat(text_content):
+    if not text_content:
         return
     if "在此处填写" in PUSHPLUS_TOKEN:
         print("[-] 未配置 PushPlus Token，跳过微信推送。")
         return
         
-    print("[*] 正在将课表以卡片形式推送到微信...")
+    print("[*] 正在将课表推送到微信...")
     url = "http://www.pushplus.plus/send"
     data = {
         "token": PUSHPLUS_TOKEN,
-        "title": "📚 您的本周课表已送达",
-        "content": html_content,
-        "template": "html"
+        "title": "📅 明日课表提醒",
+        "content": text_content,
+        "template": "txt" # 使用简洁的纯文本格式
     }
     
     try:
@@ -183,5 +171,5 @@ def push_to_wechat(html_content):
 if __name__ == "__main__":
     session = login()
     if session:
-        schedule_html = fetch_and_parse_schedule(session)
-        push_to_wechat(schedule_html)
+        schedule_msg = fetch_and_parse_schedule(session)
+        push_to_wechat(schedule_msg)
