@@ -3,3 +3,5 @@ ddddocr
 beautifulsoup4
 opencv-python-headless
 numpy
+icalendar
+pytz
