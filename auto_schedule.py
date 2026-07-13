@@ -5,34 +5,18 @@ from bs4 import BeautifulSoup
 import time
 import datetime
 import random
+import re
+from icalendar import Calendar, Event
+import pytz
 
-# ====== 配置区域 ======
 USER = os.environ.get("EDU_USER", "212404657")
 PWD = os.environ.get("EDU_PWD", "lc010913.")
-PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN", "f64d5b2610eb492b8f0033cfc74b87c3")
-# ======================
-
-def check_holiday(bj_now):
-    """
-    检查是否是寒暑假。如果是，直接返回 True 阻止程序继续运行。
-    规则：1月15日到2月底，以及7月1日到8月底视为假期。
-    """
-    month = bj_now.month
-    day = bj_now.day
-    
-    if month == 7 or month == 8:
-        return True
-    if month == 1 and day >= 15:
-        return True
-    if month == 2:
-        return True
-    return False
+TZ = pytz.timezone('Asia/Shanghai')
 
 def login():
     base_url = "https://jwc.fdzcxy.edu.cn/"
     captcha_url = base_url + "ValidateCookie.asp"
     
-    # 3. 随机浏览器标识池（防封锁机制）
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
@@ -47,7 +31,6 @@ def login():
     for attempt in range(max_retries):
         try:
             session = requests.Session()
-            # 每次请求随机挑选一个 User-Agent
             headers = {
                 "User-Agent": random.choice(user_agents),
                 "Referer": base_url
@@ -68,12 +51,10 @@ def login():
             captcha_text = ocr.classification(res_captcha.content)
             
             if len(captcha_text) != 4 or not captcha_text.isalnum():
-                print(f"[*] 尝试 {attempt + 1}/{max_retries}: 识别为 '{captcha_text}' (跳过)")
-                # 3. 随机休眠 0.5 到 1.5 秒，模拟真人慢速操作
                 time.sleep(random.uniform(0.5, 1.5))
                 continue
                 
-            print(f"[*] 尝试 {attempt + 1}/{max_retries}: 识别为 '{captcha_text}' (发起登录)")
+            print(f"[*] 尝试 {attempt + 1}/{max_retries}: 识别为 '{captcha_text}'")
             data = {
                 "muser": USER,
                 "passwd": PWD,
@@ -103,21 +84,16 @@ def login():
                 return session
 
         except Exception as e:
-            print(f"[*] 尝试 {attempt + 1}/{max_retries}: 网络波动或超时，休息后重试...")
             time.sleep(random.uniform(2.0, 4.0))
             continue
 
     print(f"[-] 连续 {max_retries} 次尝试均失败。")
     return None
 
-def fetch_and_parse_schedule(session):
-    print("\n[*] 登录成功，开始拉取课表数据...")
-    
-    # 恢复为默认的课表地址（抓取本周）
+def fetch_schedule(session):
+    print("\n[*] 登录成功，开始拉取本周课表数据...")
     schedule_url = "https://jwc.fdzcxy.edu.cn/kb/zkb_xs.asp"
-    print(f"[*] 正在获取课表: {schedule_url}")
     
-    # 2. 课表拉取的重试机制 (最多试3次)
     res_schedule = None
     for fetch_attempt in range(3):
         try:
@@ -126,110 +102,139 @@ def fetch_and_parse_schedule(session):
             break
         except Exception as e:
             print(f"[-] 获取课表时网络超时 (尝试 {fetch_attempt+1}/3): {e}")
-            if fetch_attempt == 2:
-                return "⚠️课表获取超时", "教务系统网络太卡啦，获取课表失败，请手动登录查看！"
             time.sleep(3)
             
+    if not res_schedule:
+        print("[-] 拉取课表失败。")
+        return None
+        
     soup = BeautifulSoup(res_schedule.text, 'html.parser')
-    
     table = soup.find('table', class_='table1')
     if not table:
         print("[-] 未能在页面中找到课表对应的表格(class=table1)")
-        return "课表获取失败", "未能找到课表表格，请联系助手更新。"
+        return None
         
-    print("[+] 成功解析出课表框架，正在提取明天的课程...")
-    
-    utc_now = datetime.datetime.utcnow()
-    bj_now = utc_now + datetime.timedelta(hours=8)
-    tomorrow = bj_now + datetime.timedelta(days=1)
-    tomorrow_weekday = tomorrow.weekday()
-    
-    weekdays_zh = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    tomorrow_zh = weekdays_zh[tomorrow_weekday]
-    
-    if tomorrow_weekday >= 5: 
-        msg = f"明天是{tomorrow_zh}，好好休息吧，没有课哦！\n\n(注: 周末如有临时安排请留意通知)"
-        return "明日无课，安心休息", msg
-        
-    col_idx = tomorrow_weekday + 1 
-    
-    classes = []
-    short_classes = [] 
-    
-    for i in range(1, 12):
-        row_id = f"tr{i}"
-        tr = table.find('tr', id=row_id)
-        if not tr: continue
-            
-        tds = tr.find_all('td')
-        if len(tds) < 6: continue
-            
-        time_parts = tds[0].get_text(separator='|', strip=True).split('|')
-        jie_num = time_parts[0] if len(time_parts) >= 1 else str(i)
-        time_val = time_parts[1] if len(time_parts) >= 2 else f"第{jie_num}节"
-            
-        cell_text = tds[col_idx].get_text(separator=' ', strip=True)
-        if cell_text and cell_text != '' and cell_text != '&nbsp;':
-            parts = cell_text.split()
-            course_name = parts[0] if len(parts) > 0 else "未知课程"
-            location = parts[1] if len(parts) > 1 else ""
-            
-            short_item = f"{time_val} {course_name[:12]} {location}".strip()
-            short_classes.append(short_item)
-            
-            classes.append(f"⏰ {time_val}\n📚 {course_name}\n📍 {location}".strip())
-            
-    if not classes:
-        full_msg = f"明天是{tomorrow_zh}，您全天没课，可以自由安排！"
-        short_title = "明日无课，安心休息"
-    else:
-        full_msg = f"📅 【{tomorrow_zh} 课表】\n\n" + "\n\n".join(classes)
-        short_title = " ".join(short_classes)
-        
-        if len(short_title) > 65: 
-            short_title = short_title[:62] + "..."
-            
-    print("[+] 明日课表文字生成完毕！")
-    return short_title, full_msg
+    return soup, table
 
-def push_to_wechat(title, text_content):
-    if not text_content:
-        return
-    if "在此处填写" in PUSHPLUS_TOKEN:
-        print("[-] 未配置 PushPlus Token，跳过微信推送。")
-        return
-        
-    print("[*] 正在将课表推送到微信...")
-    url = "http://www.pushplus.plus/send"
-    data = {
-        "token": PUSHPLUS_TOKEN,
-        "title": title,
-        "content": text_content,
-        "template": "txt" 
-    }
-    
+def parse_time(time_str):
+    # time_str 类似 "08:00"
     try:
-        res = requests.post(url, json=data, timeout=15)
-        if res.status_code == 200 and res.json().get('code') == 200:
-            print("[+] 微信推送成功！")
-        else:
-            print("[-] 微信推送失败:", res.text)
-    except Exception as e:
-        print("[-] 微信推送请求异常:", e)
+        h, m = map(int, time_str.split(':'))
+        return datetime.time(h, m)
+    except:
+        return datetime.time(8, 0) # 默认
+
+def update_calendar(soup, table):
+    # 提取本周一的日期
+    text = soup.get_text()
+    match = re.search(r'\((\d{4}/\d{1,2}/\d{1,2})-\d{4}/\d{1,2}/\d{1,2}\)', text)
+    
+    if match:
+        monday_str = match.group(1)
+        monday_date = datetime.datetime.strptime(monday_str, "%Y/%m/%d").date()
+    else:
+        print("[-] 未能从页面提取本周日期，默认使用当前周一。")
+        today = datetime.date.today()
+        monday_date = today - datetime.timedelta(days=today.weekday())
+        
+    print(f"[*] 解析到本周一日期: {monday_date}")
+    
+    # 提取本周所有课程
+    parsed_events = []
+    
+    # 遍历1-7天（列，2到8列，如果第一列是节次）
+    for day_offset in range(7):
+        current_date = monday_date + datetime.timedelta(days=day_offset)
+        col_idx = day_offset + 1
+        
+        for i in range(1, 12):
+            row_id = f"tr{i}"
+            tr = table.find('tr', id=row_id)
+            if not tr: continue
+                
+            tds = tr.find_all('td')
+            if len(tds) < 6 or col_idx >= len(tds): continue
+                
+            time_parts = tds[0].get_text(separator='|', strip=True).split('|')
+            jie_num = time_parts[0] if len(time_parts) >= 1 else str(i)
+            time_val = time_parts[1] if len(time_parts) >= 2 else f"08:00"
+                
+            cell_text = tds[col_idx].get_text(separator=' ', strip=True)
+            if cell_text and cell_text != '' and cell_text != '&nbsp;':
+                parts = cell_text.split()
+                course_name = parts[0] if len(parts) > 0 else "未知课程"
+                location = parts[1] if len(parts) > 1 else ""
+                
+                # 开始和结束时间
+                start_time = parse_time(time_val)
+                start_dt = datetime.datetime.combine(current_date, start_time)
+                start_dt = TZ.localize(start_dt)
+                
+                # 每节课45分钟，中间休息10分钟，两节连上共100分钟
+                end_dt = start_dt + datetime.timedelta(minutes=100)
+                
+                # 唯一UID，基于 日期-节次-课程名
+                uid = f"{current_date.strftime('%Y%m%d')}-{jie_num}-{course_name}@fdzcxy"
+                
+                parsed_events.append({
+                    "uid": uid,
+                    "summary": course_name,
+                    "location": location,
+                    "start_dt": start_dt,
+                    "end_dt": end_dt
+                })
+
+    # 处理日历文件
+    cal_file = "schedule.ics"
+    cal = Calendar()
+    cal.add('prodid', '-//Auto Schedule Sync//fdzcxy//CN')
+    cal.add('version', '2.0')
+    
+    if os.path.exists(cal_file):
+        try:
+            with open(cal_file, 'rb') as f:
+                old_cal = Calendar.from_ical(f.read())
+            
+            # 本周的起止日期
+            week_start = monday_date
+            week_end = monday_date + datetime.timedelta(days=6)
+            
+            # 保留不属于本周的历史事件
+            for component in old_cal.walk():
+                if component.name == "VEVENT":
+                    dtstart = component.get('dtstart').dt
+                    if isinstance(dtstart, datetime.datetime):
+                        dt_date = dtstart.date()
+                    else:
+                        dt_date = dtstart
+                    
+                    if not (week_start <= dt_date <= week_end):
+                        cal.add_component(component)
+        except Exception as e:
+            print(f"[-] 读取旧日历出错: {e}，将重新创建。")
+            
+    # 添加本次抓取到的本周事件
+    for ev_data in parsed_events:
+        event = Event()
+        event.add('uid', ev_data["uid"])
+        event.add('summary', ev_data["summary"])
+        event.add('location', ev_data["location"])
+        event.add('dtstart', ev_data["start_dt"])
+        event.add('dtend', ev_data["end_dt"])
+        event.add('dtstamp', datetime.datetime.now(TZ))
+        cal.add_component(event)
+        
+    with open(cal_file, 'wb') as f:
+        f.write(cal.to_ical())
+        
+    print(f"[+] 日历更新完成！共写入 {len(parsed_events)} 节本周课程，保存为 {cal_file}")
 
 if __name__ == "__main__":
-    utc_now = datetime.datetime.utcnow()
-    bj_now = utc_now + datetime.timedelta(hours=8)
-    
-    # 4. 节假日智能跳过 (已开启)
-    if check_holiday(bj_now):
-        print("[*] 当前处于寒暑假期间，智能休眠，不进行推送。")
-        import sys; sys.exit(0)
-        
     session = login()
     if session:
-        short_title, schedule_msg = fetch_and_parse_schedule(session)
-        push_to_wechat(short_title, schedule_msg)
+        result = fetch_schedule(session)
+        if result:
+            soup, table = result
+            update_calendar(soup, table)
     else:
-        # 1. 失败告警机制
-        push_to_wechat("⚠️教务系统登录失败", "重试了100次都没进去，可能是系统维护或密码修改了，请注意手动核查明日课表！")
+        print("[-] 登录失败，退出。")
