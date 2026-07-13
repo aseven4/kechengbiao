@@ -224,6 +224,17 @@ def update_calendar(soup, table):
         event.add('dtstamp', datetime.datetime.now(TZ))
         cal.add_component(event)
         
+    # 如果日历是完全空的（暑假期间0节课），必须塞入一个占位事件，否则手机日历会报错“订阅失败/格式错误”
+    if not cal.subcomponents:
+        dummy = Event()
+        dummy.add('uid', 'dummy-sync-active@fdzcxy')
+        dummy.add('summary', '课表同步已激活 (目前处于假期或本周无课)')
+        # 设置为一个全天事件，日期为本周一
+        dummy.add('dtstart', monday_date)
+        dummy.add('dtstamp', datetime.datetime.now(TZ))
+        cal.add_component(dummy)
+        print("[*] 日历为空，已自动插入占位事件以防止手机订阅失败。")
+        
     with open(cal_file, 'wb') as f:
         f.write(cal.to_ical())
         
