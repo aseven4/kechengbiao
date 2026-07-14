@@ -117,7 +117,6 @@ def fetch_schedule(session):
     return soup, table
 
 def parse_time(time_str):
-    # time_str 类似 "08:00"
     try:
         h, m = map(int, time_str.split(':'))
         return datetime.time(h, m)
@@ -125,7 +124,6 @@ def parse_time(time_str):
         return datetime.time(8, 0) # 默认
 
 def update_calendar(soup, table):
-    # 提取本周一的日期
     text = soup.get_text()
     match = re.search(r'\((\d{4}/\d{1,2}/\d{1,2})-\d{4}/\d{1,2}/\d{1,2}\)', text)
     
@@ -139,8 +137,8 @@ def update_calendar(soup, table):
         
     print(f"[*] 解析到本周一日期: {monday_date}")
     
-    # 提取本周所有课程
     parsed_events = []
+    classes_per_day = {i: 0 for i in range(7)}
     
     # 遍历1-7天（列，2到8列，如果第一列是节次）
     for day_offset in range(7):
@@ -165,7 +163,6 @@ def update_calendar(soup, table):
                 course_name = parts[0] if len(parts) > 0 else "未知课程"
                 location = parts[1] if len(parts) > 1 else ""
                 
-                # 开始和结束时间
                 start_time = parse_time(time_val)
                 start_dt = datetime.datetime.combine(current_date, start_time)
                 start_dt = TZ.localize(start_dt)
@@ -173,7 +170,6 @@ def update_calendar(soup, table):
                 # 每节课45分钟，中间休息10分钟，两节连上共100分钟
                 end_dt = start_dt + datetime.timedelta(minutes=100)
                 
-                # 唯一UID，基于 日期-节次-课程名
                 uid = f"{current_date.strftime('%Y%m%d')}-{jie_num}-{course_name}@fdzcxy"
                 
                 parsed_events.append({
@@ -183,8 +179,17 @@ def update_calendar(soup, table):
                     "start_dt": start_dt,
                     "end_dt": end_dt
                 })
+                classes_per_day[day_offset] += 1
+                
+        # 每天遍历完后，如果今天一节课都没有，就加一个全天“今日无课”的占位符
+        if classes_per_day[day_offset] == 0:
+            parsed_events.append({
+                "uid": f"no-class-{current_date.strftime('%Y%m%d')}@fdzcxy",
+                "summary": "今日无课",
+                "location": "",
+                "start_dt": current_date # 传入 date 对象表示全天事件
+            })
 
-    # 处理日历文件
     cal_file = "schedule.ics"
     cal = Calendar()
     cal.add('prodid', '-//Auto Schedule Sync//fdzcxy//CN')
@@ -195,11 +200,9 @@ def update_calendar(soup, table):
             with open(cal_file, 'rb') as f:
                 old_cal = Calendar.from_ical(f.read())
             
-            # 本周的起止日期
             week_start = monday_date
             week_end = monday_date + datetime.timedelta(days=6)
             
-            # 保留不属于本周的历史事件
             for component in old_cal.walk():
                 if component.name == "VEVENT":
                     dtstart = component.get('dtstart').dt
@@ -213,32 +216,22 @@ def update_calendar(soup, table):
         except Exception as e:
             print(f"[-] 读取旧日历出错: {e}，将重新创建。")
             
-    # 添加本次抓取到的本周事件
     for ev_data in parsed_events:
         event = Event()
         event.add('uid', ev_data["uid"])
         event.add('summary', ev_data["summary"])
-        event.add('location', ev_data["location"])
+        if ev_data.get("location"):
+            event.add('location', ev_data["location"])
         event.add('dtstart', ev_data["start_dt"])
-        event.add('dtend', ev_data["end_dt"])
+        if "end_dt" in ev_data:
+            event.add('dtend', ev_data["end_dt"])
         event.add('dtstamp', datetime.datetime.now(TZ))
         cal.add_component(event)
-        
-    # 如果日历是完全空的（暑假期间0节课），必须塞入一个占位事件，否则手机日历会报错“订阅失败/格式错误”
-    if not cal.subcomponents:
-        dummy = Event()
-        dummy.add('uid', 'dummy-sync-active@fdzcxy')
-        dummy.add('summary', '课表同步已激活 (目前处于假期或本周无课)')
-        # 设置为一个全天事件，日期为本周一
-        dummy.add('dtstart', monday_date)
-        dummy.add('dtstamp', datetime.datetime.now(TZ))
-        cal.add_component(dummy)
-        print("[*] 日历为空，已自动插入占位事件以防止手机订阅失败。")
         
     with open(cal_file, 'wb') as f:
         f.write(cal.to_ical())
         
-    print(f"[+] 日历更新完成！共写入 {len(parsed_events)} 节本周课程，保存为 {cal_file}")
+    print(f"[+] 日历更新完成！")
 
 if __name__ == "__main__":
     session = login()
