@@ -90,9 +90,9 @@ def login():
     print(f"[-] 连续 {max_retries} 次尝试均失败。")
     return None
 
-def fetch_schedule(session):
-    print("\n[*] 登录成功，开始拉取本周课表数据...")
-    schedule_url = "https://jwc.fdzcxy.edu.cn/kb/zkb_xs.asp"
+def fetch_schedule(session, url=None):
+    schedule_url = url if url else "https://jwc.fdzcxy.edu.cn/kb/zkb_xs.asp"
+    print(f"\n[*] 开始拉取课表数据: {schedule_url}")
     
     res_schedule = None
     for fetch_attempt in range(3):
@@ -106,13 +106,13 @@ def fetch_schedule(session):
             
     if not res_schedule:
         print("[-] 拉取课表失败。")
-        return None
+        return None, None
         
     soup = BeautifulSoup(res_schedule.text, 'html.parser')
     table = soup.find('table', class_='table1')
     if not table:
         print("[-] 未能在页面中找到课表对应的表格(class=table1)")
-        return None
+        return None, None
         
     return soup, table
 
@@ -121,7 +121,7 @@ def parse_time(time_str):
         h, m = map(int, time_str.split(':'))
         return datetime.time(h, m)
     except:
-        return datetime.time(8, 0) # 默认
+        return datetime.time(8, 0)
 
 def update_calendar(soup, table):
     text = soup.get_text()
@@ -131,16 +131,15 @@ def update_calendar(soup, table):
         monday_str = match.group(1)
         monday_date = datetime.datetime.strptime(monday_str, "%Y/%m/%d").date()
     else:
-        print("[-] 未能从页面提取本周日期，默认使用当前周一。")
+        print("[-] 未能从页面提取日期，默认使用当前周一。")
         today = datetime.date.today()
         monday_date = today - datetime.timedelta(days=today.weekday())
         
-    print(f"[*] 解析到本周一日期: {monday_date}")
+    print(f"[*] 解析到周一日期: {monday_date}")
     
     parsed_events = []
     classes_per_day = {i: 0 for i in range(7)}
     
-    # 遍历1-7天（列，2到8列，如果第一列是节次）
     for day_offset in range(7):
         current_date = monday_date + datetime.timedelta(days=day_offset)
         col_idx = day_offset + 1
@@ -166,8 +165,6 @@ def update_calendar(soup, table):
                 start_time = parse_time(time_val)
                 start_dt = datetime.datetime.combine(current_date, start_time)
                 start_dt = TZ.localize(start_dt)
-                
-                # 每节课45分钟，中间休息10分钟，两节连上共100分钟
                 end_dt = start_dt + datetime.timedelta(minutes=100)
                 
                 uid = f"{current_date.strftime('%Y%m%d')}-{jie_num}-{course_name}@fdzcxy"
@@ -181,13 +178,12 @@ def update_calendar(soup, table):
                 })
                 classes_per_day[day_offset] += 1
                 
-        # 每天遍历完后，如果今天一节课都没有，就加一个全天“今日无课”的占位符
         if classes_per_day[day_offset] == 0:
             parsed_events.append({
                 "uid": f"no-class-{current_date.strftime('%Y%m%d')}@fdzcxy",
                 "summary": "今日无课",
                 "location": "",
-                "start_dt": current_date # 传入 date 对象表示全天事件
+                "start_dt": current_date
             })
 
     cal_file = "schedule.ics"
@@ -206,11 +202,7 @@ def update_calendar(soup, table):
             for component in old_cal.walk():
                 if component.name == "VEVENT":
                     dtstart = component.get('dtstart').dt
-                    if isinstance(dtstart, datetime.datetime):
-                        dt_date = dtstart.date()
-                    else:
-                        dt_date = dtstart
-                    
+                    dt_date = dtstart.date() if isinstance(dtstart, datetime.datetime) else dtstart
                     if not (week_start <= dt_date <= week_end):
                         cal.add_component(component)
         except Exception as e:
@@ -231,14 +223,28 @@ def update_calendar(soup, table):
     with open(cal_file, 'wb') as f:
         f.write(cal.to_ical())
         
-    print(f"[+] 日历更新完成！")
+    print(f"[+] 日历更新完成！({monday_date})")
 
 if __name__ == "__main__":
     session = login()
     if session:
-        result = fetch_schedule(session)
-        if result:
-            soup, table = result
+        soup, table = fetch_schedule(session)
+        if soup and table:
+            print("[*] 正在更新本周课表...")
             update_calendar(soup, table)
+            
+            # 自动抓取下一周课表，确保周日提前知道下周课程安排
+            nweek_btn = soup.find('input', attrs={'name': 'nweek'})
+            if nweek_btn:
+                onclick = nweek_btn.get('onclick') or nweek_btn.get('onClick') or ''
+                match = re.search(r"document\.location=['\"]([^'\"]+)['\"]", onclick)
+                if match:
+                    next_path = match.group(1).replace('&amp;', '&')
+                    next_url = "https://jwc.fdzcxy.edu.cn/kb/" + next_path
+                    print(f"\n[*] 发现下一周页面，准备提前抓取下周课表...")
+                    soup_next, table_next = fetch_schedule(session, url=next_url)
+                    if soup_next and table_next:
+                        print("[*] 正在更新下周课表...")
+                        update_calendar(soup_next, table_next)
     else:
         print("[-] 登录失败，退出。")
