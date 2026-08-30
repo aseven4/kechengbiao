@@ -196,6 +196,9 @@ def update_calendar(soup, table):
             with open(cal_file, 'rb') as f:
                 old_cal = Calendar.from_ical(f.read())
             
+            # 保留过去 14 天以内以及未来的历史事件，自动清理 14 天以前的过期旧课程
+            today_date = datetime.date.today()
+            cutoff_date = today_date - datetime.timedelta(days=14)
             week_start = monday_date
             week_end = monday_date + datetime.timedelta(days=6)
             
@@ -203,7 +206,8 @@ def update_calendar(soup, table):
                 if component.name == "VEVENT":
                     dtstart = component.get('dtstart').dt
                     dt_date = dtstart.date() if isinstance(dtstart, datetime.datetime) else dtstart
-                    if not (week_start <= dt_date <= week_end):
+                    # 只有日期在 14 天以内，且不属于本次要更新的周，才予以保留
+                    if dt_date >= cutoff_date and not (week_start <= dt_date <= week_end):
                         cal.add_component(component)
         except Exception as e:
             print(f"[-] 读取旧日历出错: {e}，将重新创建。")
