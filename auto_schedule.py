@@ -116,6 +116,35 @@ def fetch_schedule(session, url=None):
         
     return soup, table
 
+def get_teacher_map(session):
+    teacher_map = {}
+    try:
+        url = "https://jwc.fdzcxy.edu.cn/kb/kb_xs.asp"
+        res = session.get(url, timeout=15)
+        res.encoding = 'utf-8'
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        for tr in soup.find_all('tr'):
+            tds = [td.get_text(strip=True) for td in tr.find_all('td')]
+            if len(tds) >= 4:
+                course_raw = tds[0]
+                teacher_raw = tds[2]
+                
+                if course_raw and teacher_raw and teacher_raw not in ['任课教师', '讲授', '实验', '周数']:
+                    c_clean = course_raw.strip()
+                    t_clean = teacher_raw.strip()
+                    
+                    if c_clean and t_clean and len(t_clean) <= 25:
+                        teacher_map[c_clean] = t_clean
+                        norm_key = re.sub(r'[\(（\s].*', '', c_clean).strip()
+                        if norm_key:
+                            teacher_map[norm_key] = t_clean
+        print(f"[+] 成功提取到 {len(teacher_map)} 条任课教师对应关系。")
+    except Exception as e:
+        print(f"[-] 获取教师信息失败: {e}")
+        
+    return teacher_map
+
 def parse_time(time_str):
     try:
         h, m = map(int, time_str.split(':'))
@@ -123,7 +152,7 @@ def parse_time(time_str):
     except:
         return datetime.time(8, 0)
 
-def update_calendar(soup, table):
+def update_calendar(soup, table, teacher_map=None):
     text = soup.get_text()
     match = re.search(r'\((\d{4}/\d{1,2}/\d{1,2})-\d{4}/\d{1,2}/\d{1,2}\)', text)
     
@@ -167,12 +196,22 @@ def update_calendar(soup, table):
                 start_dt = TZ.localize(start_dt)
                 end_dt = start_dt + datetime.timedelta(minutes=100)
                 
+                # 匹配任课教师真实全名
+                teacher = None
+                if teacher_map:
+                    norm_name = re.sub(r'[\(（\s].*', '', course_name).strip()
+                    teacher = teacher_map.get(course_name) or teacher_map.get(norm_name)
+                    
+                display_summary = f"{course_name} ({teacher})" if teacher else course_name
+                description = f"任课教师: {teacher}" if teacher else ""
+                
                 uid = f"{current_date.strftime('%Y%m%d')}-{jie_num}-{course_name}@fdzcxy"
                 
                 parsed_events.append({
                     "uid": uid,
-                    "summary": course_name,
+                    "summary": display_summary,
                     "location": location,
+                    "description": description,
                     "start_dt": start_dt,
                     "end_dt": end_dt
                 })
@@ -196,7 +235,6 @@ def update_calendar(soup, table):
             with open(cal_file, 'rb') as f:
                 old_cal = Calendar.from_ical(f.read())
             
-            # 保留过去 14 天以内以及未来的历史事件，自动清理 14 天以前的过期旧课程
             today_date = datetime.date.today()
             cutoff_date = today_date - datetime.timedelta(days=14)
             week_start = monday_date
@@ -206,7 +244,6 @@ def update_calendar(soup, table):
                 if component.name == "VEVENT":
                     dtstart = component.get('dtstart').dt
                     dt_date = dtstart.date() if isinstance(dtstart, datetime.datetime) else dtstart
-                    # 只有日期在 14 天以内，且不属于本次要更新的周，才予以保留
                     if dt_date >= cutoff_date and not (week_start <= dt_date <= week_end):
                         cal.add_component(component)
         except Exception as e:
@@ -218,6 +255,8 @@ def update_calendar(soup, table):
         event.add('summary', ev_data["summary"])
         if ev_data.get("location"):
             event.add('location', ev_data["location"])
+        if ev_data.get("description"):
+            event.add('description', ev_data["description"])
         event.add('dtstart', ev_data["start_dt"])
         if "end_dt" in ev_data:
             event.add('dtend', ev_data["end_dt"])
@@ -232,12 +271,13 @@ def update_calendar(soup, table):
 if __name__ == "__main__":
     session = login()
     if session:
+        teacher_map = get_teacher_map(session)
+        
         soup, table = fetch_schedule(session)
         if soup and table:
             print("[*] 正在更新本周课表...")
-            update_calendar(soup, table)
+            update_calendar(soup, table, teacher_map=teacher_map)
             
-            # 自动抓取下一周课表，确保周日提前知道下周课程安排
             nweek_btn = soup.find('input', attrs={'name': 'nweek'})
             if nweek_btn:
                 onclick = nweek_btn.get('onclick') or nweek_btn.get('onClick') or ''
@@ -249,6 +289,6 @@ if __name__ == "__main__":
                     soup_next, table_next = fetch_schedule(session, url=next_url)
                     if soup_next and table_next:
                         print("[*] 正在更新下周课表...")
-                        update_calendar(soup_next, table_next)
+                        update_calendar(soup_next, table_next, teacher_map=teacher_map)
     else:
         print("[-] 登录失败，退出。")
